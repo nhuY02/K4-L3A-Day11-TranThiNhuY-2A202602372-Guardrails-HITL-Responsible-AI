@@ -86,13 +86,41 @@ class ConfidenceRouter:
         #      action="escalate", priority="high",
         #      requires_human=True, reason="Low confidence — escalating"
 
-        return RoutingDecision(
-            action="auto_send",
-            confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+        # 1. Check if action_type is in HIGH_RISK_ACTIONS
+        if action_type in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type}",
+                priority="high",
+                requires_human=True,
+            )
+
+        # 2. Check confidence thresholds
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence",
+                priority="low",
+                requires_human=False,
+            )
+        elif confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs review",
+                priority="normal",
+                requires_human=True,
+            )
+        else:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason="Low confidence — escalating",
+                priority="high",
+                requires_human=True,
+            )
 
 
 # ============================================================
@@ -115,33 +143,33 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "High-Value Wire Transfer Approval",
+        "trigger": "Customer requests transfer > 100,000,000 VND or unusual international destination",
+        "hitl_model": "human-in-the-loop",
+        "context_needed": "Sender account, beneficiary name/account/bank, transfer amount, sender device history, IP address",
+        "example": "Customer requests transferring 250,000,000 VND to a newly registered offshore beneficiary",
+        "approval_path": "Bank compliance officer approves with 2FA token; reject notifies fraud team; timeout (15 mins) cancels transaction safely",
+        "audit_fields": "trace_id, customer_id, intent='wire_transfer', beneficiary_hash, amount, risk_score, reviewer_id, verdict, timestamp",
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Sensitive Account Credential & Phone Number Change",
+        "trigger": "Request to update registered phone number, email, or reset biometric authentication from an unrecognized device",
+        "hitl_model": "human-in-the-loop",
+        "context_needed": "National ID photo, face verification match score, old phone vs proposed phone, account balance, recent activity",
+        "example": "Customer requests changing OTP phone number 10 minutes after a failed login attempt from a foreign IP",
+        "approval_path": "Customer service agent conducts video KYC call to confirm identity; approve commits update, reject locks account temporarily, timeout rejects",
+        "audit_fields": "trace_id, account_number, old_phone_hash, new_phone_hash, kyc_score, agent_id, verification_method, timestamp",
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Overdraft & Credit Card Limit Increase Post-Audit",
+        "trigger": "Automated underwriting algorithm approves credit limit increase > 50,000,000 VND with borderline credit score",
+        "hitl_model": "human-on-the-loop",
+        "context_needed": "CIC credit bureau report, 6-month payroll transaction history, debt-to-income ratio (DTI), automated risk model breakdown",
+        "example": "System auto-generates credit limit upgrade from 20M to 80M VND for customer with DTI near 45%",
+        "approval_path": "Transaction executes automatically in batch; human credit officer reviews async queue within 24 hours to reverse or certify limit",
+        "audit_fields": "application_id, user_id, proposed_limit, previous_limit, cic_score, dti_ratio, auto_verdict, auditor_review_status",
     },
 ]
 

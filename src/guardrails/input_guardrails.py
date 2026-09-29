@@ -11,7 +11,14 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import sys
+import unicodedata
+from pathlib import Path
 from typing import Literal
+
+_SRC = Path(__file__).resolve().parent.parent
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from google.genai import types
 from google.adk.plugins import base_plugin
@@ -42,6 +49,21 @@ InputStatus = Literal["ALLOW", "BLOCK"]
 # Regex is one signal, not the whole security boundary.
 # ============================================================
 
+def _canonicalize_text(text: str) -> str:
+    """Chuẩn hóa văn bản: loại bỏ các ký tự ẩn (zero-width characters, soft hyphens)
+    và chuẩn hóa Unicode (NFKC) để ngăn chặn kỹ thuật bypass qua khoảng trắng vô hình.
+    """
+    if not text:
+        return ""
+    # Chuẩn hóa NFKC
+    normalized = unicodedata.normalize("NFKC", text)
+    # Loại bỏ các ký tự điều khiển/khoảng trắng vô hình (Zero-width space, ZWNJ, ZWJ, BOM, soft hyphen, v.v.)
+    cleaned = re.sub(r"[\u200B-\u200D\uFEFF\u00AD\u2060\u200E\u200F]", "", normalized)
+    # Rút gọn chuỗi nhiều khoảng trắng liên tiếp về 1 space đơn
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
 def detect_injection(user_input: str) -> InputStatus:
     """Detect prompt injection patterns in user input.
 
@@ -51,15 +73,38 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    if not user_input:
+        return "ALLOW"
+
+    # Bước 1: Chuẩn hóa chuỗi đầu vào loại bỏ ký tự tàng hình (Unicode evasion)
+    normalized_input = _canonicalize_text(user_input)
+
+    # Bước 2: Danh sách các pattern tấn công đối kháng phổ biến
+    # Thiết kế có word boundary (\b) và ngữ cảnh để tránh chặn nhầm câu banking hợp lệ
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        # Nhóm 1: Bỏ qua chỉ thị trước đó (Ignore previous instructions, disregard instructions)
+        r"\b(ignore|disregard|forget|override)\s+(all\s+)?(previous|above|prior|system)\s+(instructions?|commands?|prompts?|rules?)\b",
+
+        # Nhóm 2: Jailbreak / thay đổi vai trò (You are now DAN, you are now an unrestricted AI)
+        r"\byou\s+are\s+now\s+(an?\s+)?\w+",
+
+        # Nhóm 3: Giả định vai trò không giới hạn (Pretend/Act as unrestricted/jailbreak)
+        r"\b(pretend|act\s+as)\s+(you\s+are|to\s+be|an?\s+unrestricted)\b",
+
+        # Nhóm 4: Yêu cầu trích xuất system prompt / cấu hình hệ thống
+        r"\b(show|reveal|display|output|print|give\s+me|leak)\s+(your\s+|the\s+)?(system\s+prompt|initial\s+instructions?|internal\s+instructions?|hidden\s+prompt)\b",
+
+        # Nhóm 5: Yêu cầu lộ thông tin nhạy cảm/mật khẩu hệ thống (reveal prompt/password/secret/key)
+        r"\b(reveal|leak|show|tell\s+me)\s+(your\s+|the\s+)?(internal\s+password|admin\s+password|api\s+key|db\s+password|secret)\b",
+
+        # Nhóm 6: Cụm từ bypass hoặc jailbreak trực tiếp
+        r"\b(jailbreak|developer\s+mode|unfiltered\s+mode|dan\s+mode)\b",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized_input, re.IGNORECASE):
             return "BLOCK"
+
     return "ALLOW"
 
 
@@ -74,6 +119,19 @@ def detect_injection(user_input: str) -> InputStatus:
 # Return ``"ALLOW"`` if banking-related and OK.
 # ============================================================
 
+def _remove_vietnamese_accents(text: str) -> str:
+    """Chuyển chuỗi tiếng Việt có dấu thành không dấu để so khớp linh hoạt."""
+    if not text:
+        return ""
+    # Chuẩn hóa NFD để tách các ký tự dấu
+    normalized = unicodedata.normalize("NFD", text)
+    # Loại bỏ các combining diacritical marks
+    cleaned = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+    # Thay thế ký tự đ/Đ
+    cleaned = cleaned.replace("đ", "d").replace("Đ", "D")
+    return cleaned
+
+
 def topic_filter(user_input: str) -> InputStatus:
     """Decide whether the input is on-topic for VinBank.
 
@@ -84,14 +142,42 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    if not user_input or not user_input.strip():
+        return "BLOCK"
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    # Chuẩn hóa chuỗi và loại bỏ ký tự ẩn
+    clean_text = _canonicalize_text(user_input).lower()
+    unaccented_text = _remove_vietnamese_accents(clean_text).lower()
 
-    pass  # Replace with your implementation
+    # Bước 1: Kiểm tra các chủ đề bị cấm (BLOCKED_TOPICS)
+    # Dùng word boundary \b cho các từ đơn để tránh chặn nhầm (như "skill" chứa "kill")
+    for blocked in BLOCKED_TOPICS:
+        blocked_word = blocked.lower().strip()
+        pattern = rf"\b{re.escape(blocked_word)}\b"
+        if re.search(pattern, clean_text) or re.search(pattern, unaccented_text):
+            return "BLOCK"
+
+    # Bước 2: Kiểm tra xem input có liên quan đến chủ đề ngân hàng cho phép (ALLOWED_TOPICS) hay không
+    # Khớp trên cả bản gốc tiếng Việt và bản không dấu
+    is_allowed = False
+    for allowed in ALLOWED_TOPICS:
+        allowed_word = allowed.lower().strip()
+        # Đối với cụm từ nhiều chữ (như "tai khoan", "chuyen tien"), kiểm tra sự xuất hiện trong chuỗi
+        if " " in allowed_word:
+            if allowed_word in clean_text or allowed_word in unaccented_text:
+                is_allowed = True
+                break
+        else:
+            # Đối với từ đơn, kiểm tra với word boundary
+            pattern = rf"\b{re.escape(allowed_word)}\b"
+            if re.search(pattern, clean_text) or re.search(pattern, unaccented_text):
+                is_allowed = True
+                break
+
+    if not is_allowed:
+        return "BLOCK"
+
+    return "ALLOW"
 
 
 # ============================================================
@@ -144,14 +230,29 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        # Xử lý trường hợp chuỗi rỗng
+        if not text or not text.strip():
+            self.blocked_count += 1
+            return self._block_response(
+                "Invalid request. Please provide a banking-related query."
+            )
 
-        pass  # Replace with your implementation
+        # 1. Kiểm tra tấn công Prompt Injection (REQ-F01)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request due to security policy."
+            )
+
+        # 2. Kiểm tra giới hạn chủ đề ngân hàng (REQ-F02)
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank assistant and can only help with banking-related questions."
+            )
+
+        # 3. An toàn: cho phép truyền thông điệp tới LLM
+        return None
 
 
 # ============================================================
